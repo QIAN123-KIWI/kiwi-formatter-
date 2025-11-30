@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KIWI智能排版系统 Pro</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- 核心库: Mammoth (读取Word), Docx (生成Word) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+    <script src="https://unpkg.com/docx@7.5.0/build/index.js"></script>
+
+    <style>
+        @media print {
+            @page { size: A4; margin: 0; }
+            body { background: white; }
+            .print-hidden { display: none !important; }
+        }
+        .font-song { font-family: "SimSun", "宋体", serif; }
+        
+        /* 预览表格样式 - 完美还原边框和合并 */
+        .preview-table { 
+            width: 100%; 
+            border-collapse: collapse; 
+            margin: 1em 0; 
+            font-size: 14px; 
+            border: 2px solid #000; 
+            table-layout: fixed; /* 修复表格宽度问题 */
+        }
+        .preview-table td, .preview-table th { 
+            border: 1px solid #000; 
+            padding: 6px 8px; 
+            text-align: center; 
+            word-wrap: break-word;
+            vertical-align: middle;
+        }
+        
+        /* 滚动条美化 */
+        .custom-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+        .custom-scroll::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 5px; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 5px; border: 2px solid #f1f1f1; }
+        .custom-scroll::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 h-screen overflow-hidden flex flex-col">
+    <div id="root" class="h-full flex flex-col"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        const Icon = ({ path }) => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={path} /></svg>;
+        const paths = {
+            upload: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12",
+            file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6",
+            trash: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
+            download: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3",
+            check: "M20 6L9 17l-5-5"
+        };
+
+        function App() {
+            const [activeTab, setActiveTab] = useState('text'); 
+            const [inputText, setInputText] = useState('');
+            const [content, setContent] = useState([]);
+            const [isProcessing, setIsProcessing] = useState(false);
+
+            const SPECS = {
+                margins: { top: '37mm', bottom: '35mm', left: '28mm', right: '26mm' },
+                lineHeight: '28.9pt', 
+                fonts: {
+                    title: '"FZXiaoBiaoSong-B05S", "方正小标宋简体", "SimSun", serif', 
+                    h1: '"SimHei", "黑体", sans-serif',                              
+                    h2: '"KaiTi_GB2312", "KaiTi", "楷体", serif',                    
+                    h3: '"FangSong_GB2312", "FangSong", "仿宋", serif',              
+                    body: '"FangSong_GB2312", "FangSong", "仿宋", serif',            
+                    pageNo: '"SimSun", "宋体", serif'
+                },
+                sizes: { title: '22pt', header: '16pt', body: '16pt', page: '14pt' }
+            };
+
+            // --- 文本转表格 (处理粘贴的 Tab/多空格文本) ---
+            const parseTextTables = (lines) => {
+                let parsedBlocks = [];
+                let currentTableBuffer = [];
+
+                const isTableLine = (str) => {
+                    if (str.includes('\t')) return true; 
+                    return str.trim().split(/\s{2,}/).length > 1; 
+                };
+
+                const flushTableBuffer = () => {
+                    if (currentTableBuffer.length > 0) {
+                        const tableData = currentTableBuffer.map(rowStr => {
+                            let cells = rowStr.includes('\t') ? rowStr.split('\t') : rowStr.split(/\s{2,}/);
+                            // 文本粘贴默认无合并
+                            return cells.map(c => ({ text: c.trim(), rowSpan: 1, colSpan: 1 }));
+                        });
+                        parsedBlocks.push({ type: 'table', data: tableData });
+                        currentTableBuffer = [];
+                    }
+                };
+
+                lines.forEach(line => {
+                    if (isTableLine(line)) {
+                        currentTableBuffer.push(line);
+                    } else {
+                        flushTableBuffer();
+                        if (line.trim()) parsedBlocks.push({ type: 'text', text: line });
+                    }
+                });
+                flushTableBuffer();
+                return parsedBlocks;
+            };
+
+            // --- 智能排版引擎 ---
+            const aiCleanerEngine = (inputBlocks) => {
+                let rawBlocks = [];
+
+                if (typeof inputBlocks === 'string') {
+                    // 纯文本处理
+                    let cleanText = inputBlocks
+                        .replace(/^(好的|明白了|Sure|Here is|Certainly|以下是|根据您的要求).+?(\n|$)/i, '') 
+                        .replace(/^[#]+ /gm, '')    
+                        .replace(/\*\*(.*?)\*\*/g, '$1') 
+                        .replace(/^[-*_]{3,}\s*$/gm, '') 
+                        .replace(/^\s*[-—]*\s*\d+\s*[-—]*\s*$/gm, '') 
+                        .replace(/^\s*Page\s*\d+\s*$/gmi, '')
+                        .replace(/\(页码：.*?\)/g, '');
+
+                    // 标点修正
+                    let formattedText = "";
+                    let quoteState = false; 
+                    for (let char of cleanText) {
+                        if (char === '"') { formattedText += quoteState ? '”' : '“'; quoteState = !quoteState; }
+                        else formattedText += char;
+                    }
+                    
+                    const lines = formattedText.split(/\n+/).map(t => t.trim()).filter(t => t);
+                    rawBlocks = parseTextTables(lines);
+
+                } else {
+                    // Word 结构化处理
+                    rawBlocks = inputBlocks.map(b => {
+                        if (b.type === 'table') return b; 
+                        let t = b.text.replace(/^\s*[-—]*\s*\d+\s*[-—]*\s*$/g, '').replace(/^\s*Page\s*\d+\s*$/gi, '');
+                        if (!t.trim()) return null;
+                        
+                        let formatted = "";
+                        let q = false;
+                        for (let char of t) {
+                            if (char === '"') { formatted += q ? '”' : '“'; q = !q; } else formatted += char;
+                        }
+                        return { type: 'text', text: formatted.trim() };
+                    }).filter(b => b);
+                }
+
+                let processed = [];
+                let titleLineCount = 0;
+                let level1Counter = 0; 
+                let level2Counter = 0; 
+                const toChiNum = (n) => ['一','二','三','四','五','六','七','八','九','十'][n-1] || n;
+
+                const isTitleLine = (block, idx) => {
+                    if (block.type !== 'text') return false;
+                    const text = block.text;
+                    if (idx > 4) return false; 
+                    if (text.length > 60 || /[。；;!！]$/.test(text)) return false; 
+                    if (/^[一二三四五六七八九十]+、/.test(text)) return false; 
+                    if (text.includes('公司') || text.includes('通知') || text.includes('报告') || text.includes('总结') || text.includes('计划') || text.startsWith('关于')) return true;
+                    if (text === '汇报稿' || text === '会议纪要' || text === '讲话稿' || text.includes('调研会议')) return true;
+                    if (idx === 0 && text.length < 35) return true;
+                    return false;
+                };
+
+                rawBlocks.forEach((block, index) => {
+                    if (block.type === 'table') {
+                        processed.push(block);
+                        return;
+                    }
+
+                    const line = block.text;
+
+                    if (index === titleLineCount && isTitleLine(block, index)) {
+                        processed.push({ type: 'title', text: line });
+                        titleLineCount++;
+                        return;
+                    }
+
+                    if (/^(第一部分|第二部分|第三部分|第四部分|党建部分|行政部分|附件)[:：]?/.test(line)) {
+                        level1Counter = 0; level2Counter = 0; 
+                        processed.push({ type: 'section_header', text: line });
+                        return;
+                    }
+
+                    if (index > rawBlocks.length - 6 && (/\d{4}年\d{1,2}月\d{1,2}日$/.test(line) || line.startsWith('学员') || line.startsWith('汇报人') || line.startsWith('落款'))) {
+                        processed.push({ type: 'signature_date', text: line });
+                        return;
+                    }
+
+                    let isLevel1 = false, isLevel2 = false, contentText = line;
+                    if (/^[一二三四五六七八九十]+、/.test(line)) {
+                        isLevel1 = true; contentText = line.replace(/^[一二三四五六七八九十]+、\s*/, '');
+                    } else if (/^[(（][一二三四五六七八九十]+[)）]/.test(line)) {
+                        isLevel2 = true; contentText = line.replace(/^[(（][一二三四五六七八九十]+[)）]\s*/, '');
+                    } else if (/^\d+[.．、]\s*/.test(line)) { 
+                        contentText = line.replace(/^\d+[.．、]\s*/, '');
+                        if (level1Counter > 0) isLevel2 = true; else isLevel1 = true; 
+                    }
+
+                    if (isLevel1) {
+                        level1Counter++; level2Counter = 0; 
+                        processed.push({ type: 'h1', text: `${toChiNum(level1Counter)}、${contentText}` });
+                        return;
+                    }
+                    if (isLevel2) {
+                        level2Counter++;
+                        processed.push({ type: 'h2', text: `（${toChiNum(level2Counter)}）${contentText}` });
+                        return;
+                    }
+
+                    processed.push({ type: 'body', text: line });
+                });
+
+                if (processed.length > 0 && processed[0].type !== 'title') {
+                    processed.unshift({ type: 'title', text: '关于相关工作情况的报告' });
+                }
+
+                return processed;
+            };
+
+            const handleProcess = () => {
+                if (!inputText.trim()) return;
+                setIsProcessing(true);
+                setTimeout(() => {
+                    const formatted = aiCleanerEngine(inputText);
+                    setContent(formatted);
+                    setIsProcessing(false);
+                }, 500);
+            };
+
+            // --- 文件解析 (完美支持表格合并) ---
+            const handleFileUpload = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                setIsProcessing(true);
+                try {
+                    const buffer = await file.arrayBuffer();
+                    const result = await window.mammoth.convertToHtml({ arrayBuffer: buffer });
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(result.value, 'text/html');
+                    const blocks = [];
+                    
+                    const extractNodes = (nodes) => {
+                        nodes.forEach(node => {
+                            if (node.nodeName === 'TABLE') {
+                                const rows = Array.from(node.querySelectorAll('tr')).map(tr => {
+                                    return Array.from(tr.querySelectorAll('td, th')).map(td => ({
+                                        text: td.innerText.trim(),
+                                        rowSpan: parseInt(td.getAttribute('rowspan') || '1'),
+                                        colSpan: parseInt(td.getAttribute('colspan') || '1')
+                                    }));
+                                });
+                                if (rows.length > 0 && rows[0].length > 0) {
+                                    blocks.push({ type: 'table', data: rows });
+                                }
+                            } else if (['P', 'H1', 'H2', 'H3', 'H4', 'H5'].includes(node.nodeName)) {
+                                const text = node.innerText.trim();
+                                if (text) blocks.push({ type: 'text', text: text });
+                            } else if (node.childNodes.length > 0) {
+                                extractNodes(node.childNodes);
+                            }
+                        });
+                    };
+                    extractNodes(doc.body.childNodes);
+                    const formatted = aiCleanerEngine(blocks);
+                    setContent(formatted);
+                } catch (err) { console.error(err); alert("解析失败"); } 
+                finally { setIsProcessing(false); }
+            };
+
+            // --- Word 生成 (带表格合并) ---
+            const generateDocx = () => {
+                if (!window.docx || content.length === 0) return;
+                const { Document, Packer, Paragraph, TextRun, AlignmentType, Footer, PageNumber, Table, TableRow, TableCell, WidthType, BorderStyle, VerticalAlign } = window.docx;
+                const LINE_HEIGHT = 578; 
+
+                const doc = new Document({
+                    styles: {
+                        paragraphStyles: [{
+                            id: "Normal", name: "Normal",
+                            run: { font: "仿宋_GB2312", size: 32 },
+                            paragraph: { spacing: { line: LINE_HEIGHT, lineRule: "exact" }, alignment: AlignmentType.JUSTIFIED }
+                        }]
+                    },
+                    sections: [{
+                        properties: { page: { margin: { top: "37mm", bottom: "35mm", left: "28mm", right: "26mm" } } },
+                        footers: {
+                            default: new Footer({
+                                children: [new Paragraph({
+                                    alignment: AlignmentType.CENTER,
+                                    children: [ new TextRun({ text: "— ", font: "宋体", size: 28 }), new TextRun({ children: [PageNumber.CURRENT], font: "宋体", size: 28 }), new TextRun({ text: " —", font: "宋体", size: 28 }) ]
+                                })]
+                            })
+                        },
+                        children: content.map(block => {
+                            if (block.type === 'table') {
+                                return new Table({
+                                    width: { size: 100, type: WidthType.PERCENTAGE },
+                                    rows: block.data.map((row) => 
+                                        new TableRow({
+                                            children: row.map(cell => 
+                                                new TableCell({
+                                                    children: [new Paragraph({ 
+                                                        text: cell.text, 
+                                                        style: "Normal",
+                                                        alignment: AlignmentType.CENTER
+                                                    })],
+                                                    columnSpan: cell.colSpan, 
+                                                    rowSpan: cell.rowSpan,    
+                                                    verticalAlign: VerticalAlign.CENTER,
+                                                    borders: { 
+                                                        top: { style: BorderStyle.SINGLE, size: 1, color: "000000" },
+                                                        bottom: { style: BorderStyle.SINGLE, size: 1, color: "000000" },
+                                                        left: { style: BorderStyle.SINGLE, size: 1, color: "000000" },
+                                                        right: { style: BorderStyle.SINGLE, size: 1, color: "000000" },
+                                                    }
+                                                })
+                                            )
+                                        })
+                                    )
+                                });
+                            }
+
+                            let runCfg = { text: block.text, size: 32, font: "仿宋_GB2312" };
+                            let paraCfg = { spacing: { line: LINE_HEIGHT, lineRule: "exact", before: 0, after: 0 }, indent: { firstLine: 640 }, alignment: AlignmentType.JUSTIFIED };
+
+                            switch(block.type) {
+                                case 'title':
+                                    runCfg = { text: block.text, size: 44, font: "方正小标宋简体" };
+                                    paraCfg = { alignment: AlignmentType.CENTER, spacing: { line: LINE_HEIGHT, lineRule: "exact" }, indent: { firstLine: 0 } };
+                                    break;
+                                case 'section_header':
+                                    runCfg = { text: block.text, size: 32, font: "黑体" };
+                                    paraCfg = { alignment: AlignmentType.CENTER, indent: { firstLine: 0 }, spacing: { line: LINE_HEIGHT, lineRule: "exact" } };
+                                    break;
+                                case 'h1': runCfg.font = "黑体"; break;
+                                case 'h2': runCfg.font = "楷体_GB2312"; runCfg.bold = false; break;
+                                case 'signature_date': paraCfg = { alignment: AlignmentType.RIGHT, indent: { right: 800 }, spacing: { line: LINE_HEIGHT, lineRule: "exact" } }; break;
+                            }
+                            return new Paragraph({ children: [new TextRun(runCfg)], ...paraCfg });
+                        })
+                    }]
+                });
+
+                Packer.toBlob(doc).then(blob => {
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    document.body.appendChild(a);
+                    a.style = "display: none";
+                    a.href = url;
+                    a.download = "KIWI_智能排版结果.docx";
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                });
+            };
+
+            return (
+                <div className="flex flex-col h-full">
+                    <header className="bg-white border-b px-6 py-4 flex justify-between items-center shadow-sm shrink-0 print-hidden">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-red-600 text-white p-2 rounded"><Icon path={paths.file} /></div>
+                            <div>
+                                <h1 className="text-xl font-bold text-gray-900">KIWI智能排版系统 Pro</h1>
+                                <p className="text-xs text-gray-500">支持表格合并还原 · 智能排版 · 安全离线</p>
+                            </div>
+                        </div>
+                        <div className="flex gap-2">
+                             <button onClick={() => {setInputText(''); setContent([]);}} className="px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded border"><span className="flex items-center gap-1"><Icon path={paths.trash} /> 清空</span></button>
+                             {content.length > 0 && <button onClick={generateDocx} className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm rounded shadow flex items-center gap-1"><Icon path={paths.download} /> 下载 Word</button>}
+                        </div>
+                    </header>
+
+                    <main className="flex-1 w-full max-w-[1600px] mx-auto p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-2 gap-6 overflow-hidden">
+                        {/* 左侧 */}
+                        <div className="flex flex-col gap-4 print-hidden h-full min-h-0">
+                            <div className="flex bg-white p-1 rounded-lg border shadow-sm shrink-0">
+                                <button onClick={() => setActiveTab('text')} className={`flex-1 py-2 text-sm font-medium rounded transition ${activeTab==='text' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-50'}`}>文字输入</button>
+                                <button onClick={() => setActiveTab('upload')} className={`flex-1 py-2 text-sm font-medium rounded transition ${activeTab==='upload' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-50'}`}>Word版本上传</button>
+                            </div>
+                            <div className="flex-1 bg-white rounded-xl border shadow-sm overflow-hidden flex flex-col min-h-0">
+                                {activeTab === 'text' ? (
+                                    <div className="flex-1 flex flex-col p-4 h-full min-h-0">
+                                        <textarea className="flex-1 w-full p-3 resize-none outline-none text-sm border rounded focus:border-blue-300 focus:bg-blue-50/20 custom-scroll" placeholder="请在此粘贴... &#10;系统将会把 TAB 分隔或多空格分隔的文字自动还原为表格。" value={inputText} onChange={e => setInputText(e.target.value)} />
+                                        <div className="mt-4 flex justify-end shrink-0"><button onClick={handleProcess} disabled={!inputText.trim() || isProcessing} className="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded shadow flex items-center gap-2 transition">{isProcessing ? '处理中...' : '一键智能排版'}</button></div>
+                                    </div>
+                                ) : (
+                                    <div className="flex-1 flex flex-col items-center justify-center p-8 bg-gray-50 h-full">
+                                        <label className="cursor-pointer flex flex-col items-center gap-4 group">
+                                            <input type="file" accept=".docx" onChange={handleFileUpload} className="hidden" />
+                                            <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center group-hover:scale-110 transition"><Icon path={paths.upload} /></div>
+                                            <div className="text-center text-gray-600"><p className="font-medium">点击上传 Word 版本</p><p className="text-xs mt-1">支持表格合并单元格完美还原</p></div>
+                                        </label>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* 右侧 */}
+                        <div className="flex flex-col gap-4 h-full min-h-0">
+                            <div className="flex justify-between items-center px-1 shrink-0"><h2 className="text-sm font-bold text-gray-700 flex gap-2"><Icon path={paths.file} /> 效果预览</h2>{content.length > 0 && <span className="text-xs text-green-600 bg-green-50 px-2 py-1 rounded flex gap-1"><Icon path={paths.check} /> 排版完成</span>}</div>
+                            <div className="flex-1 bg-gray-200/50 rounded-xl overflow-auto custom-scroll shadow-inner p-8 block">
+                                {content.length > 0 ? (
+                                    <div className="bg-white shadow-xl transition-all shrink-0 mx-auto" style={{ width: '210mm', minHeight: '297mm', padding: `${SPECS.margins.top} ${SPECS.margins.right} ${SPECS.margins.bottom} ${SPECS.margins.left}`, position: 'relative' }}>
+                                        {content.map((block, i) => {
+                                            if (block.type === 'table') {
+                                                // 预览层也需要支持 rowspan/colspan
+                                                return (
+                                                    <div key={i} className="overflow-x-auto w-full mb-4">
+                                                        <table className="preview-table">
+                                                            <tbody>
+                                                                {block.data.map((row, rIdx) => (
+                                                                    <tr key={rIdx}>{row.map((cell, cIdx) => (
+                                                                        <td key={cIdx} colSpan={cell.colSpan} rowSpan={cell.rowSpan}>
+                                                                            {cell.text}
+                                                                        </td>
+                                                                    ))}</tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                );
+                                            }
+                                            const styles = {
+                                                title: { fontFamily: SPECS.fonts.title, fontSize: SPECS.sizes.title, textAlign: 'center', lineHeight: '1.5', marginBottom: '0' },
+                                                section_header: { fontFamily: SPECS.fonts.h1, fontSize: SPECS.sizes.header, textAlign: 'center', lineHeight: SPECS.lineHeight, marginTop: '20pt', marginBottom: '10pt', fontWeight: 'bold' },
+                                                h1: { fontFamily: SPECS.fonts.h1, fontSize: SPECS.sizes.header, lineHeight: SPECS.lineHeight, textIndent: '2em', marginTop: '0', marginBottom: '0' },
+                                                h2: { fontFamily: SPECS.fonts.h2, fontSize: SPECS.sizes.header, lineHeight: SPECS.lineHeight, textIndent: '2em', marginTop: '0', marginBottom: '0' },
+                                                body: { fontFamily: SPECS.fonts.body, fontSize: SPECS.sizes.body, lineHeight: SPECS.lineHeight, textIndent: '2em', textAlign: 'justify', wordBreak: 'break-all' },
+                                                signature_date: { fontFamily: SPECS.fonts.body, fontSize: SPECS.sizes.body, lineHeight: SPECS.lineHeight, textAlign: 'right', marginTop: '1em', marginRight: '4em' }
+                                            };
+                                            return <div key={i} style={styles[block.type] || styles.body}>{block.text}</div>;
+                                        })}
+                                        <div className="absolute bottom-[20mm] left-0 w-full text-center text-sm font-serif text-gray-400 pointer-events-none" style={{ fontFamily: SPECS.fonts.pageNo }}>(预览页码：— 1 —)</div>
+                                    </div>
+                                ) : (
+                                    <div className="flex flex-col items-center justify-center text-gray-400 h-full"><Icon path={paths.file} /><p className="text-sm mt-2">准备就绪</p></div>
+                                )}
+                            </div>
+                        </div>
+                    </main>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
