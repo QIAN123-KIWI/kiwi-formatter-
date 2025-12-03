@@ -81,9 +81,14 @@
                     h2: '"KaiTi_GB2312", "KaiTi", "楷体", serif',                    
                     h3: '"FangSong_GB2312", "FangSong", "仿宋", serif',              
                     body: '"FangSong_GB2312", "FangSong", "仿宋", serif',            
-                    pageNo: '"SimSun", "宋体", serif'
+                    pageNo: '"FangSong_GB2312", "FangSong", "仿宋", serif' // 页码字体改为仿宋
                 },
-                sizes: { title: '22pt', header: '16pt', body: '16pt', page: '14pt' }
+                sizes: { 
+                    title: '22pt', 
+                    header: '16pt', 
+                    body: '16pt', 
+                    page: '9pt' // 小五号字 = 9pt
+                }
             };
 
             const toChiNum = (n) => ['一','二','三','四','五','六','七','八','九','十'][n-1] || n;
@@ -411,7 +416,13 @@
                     styles: { paragraphStyles: [{ id: "Normal", name: "Normal", run: { font: "仿宋_GB2312", size: 32 }, paragraph: { spacing: { line: LINE_HEIGHT_BODY, lineRule: "exact" }, alignment: AlignmentType.JUSTIFIED } }] },
                     sections: [{
                         properties: { page: { margin: { top: "37mm", bottom: "35mm", left: "28mm", right: "26mm" } } },
-                        footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [ new TextRun({ text: "— ", font: "宋体", size: 28 }), new TextRun({ children: [PageNumber.CURRENT], font: "宋体", size: 28 }), new TextRun({ text: " —", font: "宋体", size: 28 }) ] })] }) },
+                        footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [ 
+                            new TextRun({ 
+                                children: [PageNumber.CURRENT], 
+                                font: "仿宋_GB2312", 
+                                size: 18 // 小五 = 9pt = 18 half-points
+                            })
+                        ] })] }) },
                         children: content.map(block => {
                             if (block.type === 'table') {
                                 return new Table({
@@ -629,7 +640,7 @@
 
                                             return <div key={i} style={finalStyle}>{block.text}</div>;
                                         })}
-                                        <div className="absolute bottom-[20mm] left-0 w-full text-center text-sm font-serif text-gray-400 pointer-events-none" style={{ fontFamily: SPECS.fonts.pageNo }}>(预览页码：— 1 —)</div>
+                                        <div className="absolute bottom-[20mm] left-0 w-full text-center text-gray-400 pointer-events-none" style={{ fontFamily: SPECS.fonts.pageNo, fontSize: SPECS.sizes.page }}>(预览页码：1)</div>
                                     </div>
                                 ) : (
                                     <div className="flex flex-col items-center justify-center text-gray-400 h-full"><Icon path={paths.file} /><p className="text-sm mt-2">准备就绪</p></div>
