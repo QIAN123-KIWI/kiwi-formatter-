@@ -18,7 +18,9 @@
             body { background: white; }
             .print-hidden { display: none !important; }
         }
+        /* 中文字体定义 */
         .font-song { font-family: "SimSun", "宋体", serif; }
+        .font-fangsong { font-family: "FangSong_GB2312", "FangSong", "仿宋", serif; }
         
         .preview-table { 
             width: 100%; 
@@ -54,7 +56,8 @@
             file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6",
             trash: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
             download: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3",
-            check: "M20 6L9 17l-5-5"
+            check: "M20 6L9 17l-5-5",
+            info: "M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
         };
 
         function App() {
@@ -64,10 +67,14 @@
             const [isProcessing, setIsProcessing] = useState(false);
             const [docName, setDocName] = useState("公文");
 
+            // --- 核心配置 ---
+            // 1磅 ≈ 1.333px, Word中 1行 = 20 twips
+            // 全文统一行距：28磅 = 560 twips
             const SPECS = {
                 margins: { top: '37mm', bottom: '35mm', left: '28mm', right: '26mm' },
-                lineHeightBody: 560, // 28磅
-                lineHeightHeader: 640, // 32磅
+                lineHeightBody: 560, // Word twips (28pt)
+                lineHeightHeader: 560, // Word twips (28pt)
+                cssLineHeightBody: '28pt', // CSS
                 fonts: {
                     title: '"FZXiaoBiaoSong-B05S", "方正小标宋简体", "SimSun", serif', 
                     h1: '"SimHei", "黑体", sans-serif',                              
@@ -79,6 +86,22 @@
                 sizes: { title: '22pt', header: '16pt', body: '16pt', page: '14pt' }
             };
 
+            const toChiNum = (n) => ['一','二','三','四','五','六','七','八','九','十'][n-1] || n;
+
+            // 估算文本宽度 (汉字=1，其他=0.5)
+            const getTextWidth = (text) => {
+                let len = 0;
+                for (let i = 0; i < text.length; i++) {
+                    if (text.charCodeAt(i) > 127 || text.charCodeAt(i) === 94) {
+                        len += 1;
+                    } else {
+                        len += 0.5;
+                    }
+                }
+                return len;
+            };
+
+            // 解析纯文本中的表格
             const parseTextTables = (lines) => {
                 let parsedBlocks = [];
                 let currentTableBuffer = [];
@@ -101,9 +124,10 @@
                 return parsedBlocks;
             };
 
+            // 智能识别引擎
             const aiCleanerEngine = (inputBlocks) => {
                 let rawBlocks = [];
-
+                // 1. 预处理
                 if (typeof inputBlocks === 'string') {
                     let cleanText = inputBlocks
                         .replace(/^(好的|明白了|Sure|Here is|Certainly|以下是|根据您的要求).+?(\n|$)/i, '') 
@@ -132,8 +156,6 @@
                 let level1Counter = 0; 
                 let level2Counter = 0; 
                 let level3Counter = 0; 
-                const toChiNum = (n) => ['一','二','三','四','五','六','七','八','九','十'][n-1] || n;
-                
                 let detectedTitleParts = [];
 
                 const isTitleLine = (block, idx) => {
@@ -156,35 +178,27 @@
                     let numberCount = 0;
                     let totalCells = 0;
                     let hasLayoutKeywords = false;
-
                     tableBlock.data.forEach(row => {
                         row.forEach(cell => {
                             totalCells++;
                             const txt = cell.text.trim();
-                            if (/^第\s*[一二三四五六七八九十0-9]+\s*部分/.test(txt) || 
-                                /(工作总结|工作计划|汇报|年度|半年度|月份|季度)/.test(txt) ||
-                                /(^|\s)(党建|行政|思想|组织|纪律|作风)(部分|篇|章)($|\s)/.test(txt)) {
+                            if (/^第\s*[一二三四五六七八九十0-9]+\s*部分/.test(txt) || /(工作总结|工作计划|汇报|年度|半年度|月份|季度)/.test(txt) || /(^|\s)(党建|行政|思想|组织|纪律|作风)(部分|篇|章)($|\s)/.test(txt)) {
                                 hasLayoutKeywords = true;
                             }
                             const cleanTxt = txt.replace(/\d{4}年/g, '').replace(/\d{1,2}月/g, '').replace(/\d{1,2}日/g, '');
-                            if (/\d/.test(cleanTxt) && cleanTxt.length < 10) {
-                                numberCount++;
-                            }
+                            if (/\d/.test(cleanTxt) && cleanTxt.length < 10) numberCount++;
                         });
                     });
-
                     if (hasLayoutKeywords) return false; 
                     if (tableBlock.data.length === 1 && numberCount === 0) return false;
                     return (numberCount / totalCells > 0.2) || totalCells > 12;
                 };
 
+                // 2. 逐行识别
                 rawBlocks.forEach((block, index) => {
-                    // 表格处理
                     if (block.type === 'table') {
-                        if (isDataTable(block)) {
-                            processed.push(block); 
-                        } else {
-                            // 拆箱重构：
+                        if (isDataTable(block)) { processed.push(block); } 
+                        else {
                             block.data.forEach(row => {
                                 row.forEach(cell => {
                                     const txt = cell.text.trim();
@@ -218,59 +232,99 @@
                         return; 
                     }
                     
-                    if (index > rawBlocks.length - 6 && (/\d{4}年\d{1,2}月\d{1,2}日$/.test(line) || line.startsWith('学员') || line.startsWith('汇报人') || line.startsWith('落款'))) { 
-                        processed.push({ type: 'signature_date', text: line }); 
-                        return; 
-                    }
-                    
                     let isLevel1 = false, isLevel2 = false, isLevel3 = false;
                     let contentText = line;
 
                     if (/^[一二三四五六七八九十]+、/.test(line)) { 
-                        isLevel1 = true; 
-                        contentText = line.replace(/^[一二三四五六七八九十]+、\s*/, ''); 
+                        isLevel1 = true; contentText = line.replace(/^[一二三四五六七八九十]+、\s*/, ''); 
                     }
                     else if (/^[(（][一二三四五六七八九十]+[)）]/.test(line)) { 
-                        isLevel2 = true; 
-                        contentText = line.replace(/^[(（][一二三四五六七八九十]+[)）]\s*/, ''); 
+                        isLevel2 = true; contentText = line.replace(/^[(（][一二三四五六七八九十]+[)）]\s*/, ''); 
                     }
                     else if (/^\d+[.．、]\s*/.test(line)) { 
                         contentText = line.replace(/^\d+[.．、]\s*/, ''); 
-                        if (level2Counter > 0) { isLevel3 = true; } 
-                        else if (level1Counter > 0) { isLevel2 = true; } 
-                        else { isLevel1 = true; }
+                        if (level2Counter > 0) isLevel3 = true; else if (level1Counter > 0) isLevel2 = true; else isLevel1 = true;
                     }
                     
                     if (isLevel1) { 
                         level1Counter++; level2Counter = 0; level3Counter = 0;
-                        processed.push({ type: 'h1', text: `${toChiNum(level1Counter)}、${contentText}` }); 
-                        return; 
+                        processed.push({ type: 'h1', text: `${toChiNum(level1Counter)}、${contentText}` }); return; 
                     }
                     if (isLevel2) { 
                         level2Counter++; level3Counter = 0;
-                        processed.push({ type: 'h2', text: `（${toChiNum(level2Counter)}）${contentText}` }); 
-                        return; 
+                        processed.push({ type: 'h2', text: `（${toChiNum(level2Counter)}）${contentText}` }); return; 
                     }
                     if (isLevel3) {
                         level3Counter++;
-                        processed.push({ type: 'h3', text: `${level3Counter}. ${contentText}` });
-                        return;
+                        processed.push({ type: 'h3', text: `${level3Counter}. ${contentText}` }); return;
                     }
 
                     processed.push({ type: 'body', text: line });
                 });
                 
-                // 后处理：合并连续的章节标题 + 控制空行
+                // 3. 后处理 & 落款识别
                 const finalProcessed = [];
                 let skipNext = false;
 
+                // 宽松的日期匹配：支持 "2025年12月" (无日)
+                let dateIndex = -1;
+                const isDateLine = (text) => /\d{4}年\d{1,2}月/.test(text);
+
+                for (let i = processed.length - 1; i >= Math.max(0, processed.length - 10); i--) {
+                    if (processed[i].type !== 'table' && isDateLine(processed[i].text)) {
+                        dateIndex = i;
+                        break;
+                    }
+                }
+
+                let signatureStartIndex = -1;
+                if (dateIndex !== -1) {
+                    signatureStartIndex = dateIndex;
+                    for (let i = dateIndex - 1; i >= Math.max(0, dateIndex - 4); i--) {
+                        const t = processed[i].text;
+                        // 署名通常较短，且不含结束标点
+                        if (processed[i].type === 'body' && t.length < 30 && !/[。；：;!！]$/.test(t)) {
+                            signatureStartIndex = i;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
                 for (let i = 0; i < processed.length; i++) {
                     if (skipNext) { skipNext = false; continue; }
+                    
+                    if (i === signatureStartIndex && signatureStartIndex !== -1) {
+                        const signatureLines = [];
+                        let maxLen = 0;
+                        let dateLen = 0;
+                        
+                        for (let j = signatureStartIndex; j <= dateIndex; j++) {
+                            const txt = processed[j].text;
+                            signatureLines.push(txt);
+                            
+                            const w = getTextWidth(txt);
+                            if (w > maxLen) maxLen = w;
+                            if (isDateLine(txt)) dateLen = w;
+                        }
+                        
+                        // 核心计算：根据日期长度，计算需要的右侧补偿
+                        let rightOffsetChars = 4 - (maxLen - dateLen) / 2;
+                        if (rightOffsetChars < 0) rightOffsetChars = 0;
+
+                        finalProcessed.push({ 
+                            type: 'signature_group', 
+                            lines: signatureLines,
+                            rightOffsetChars: rightOffsetChars 
+                        });
+                        
+                        i = dateIndex; 
+                        continue;
+                    }
 
                     const current = processed[i];
                     const next = processed[i+1];
 
-                    // 1. 合并 "第一部分" + "标题"
                     if (current.type === 'section_header' && /^第[一二三四五六七八九十0-9]+部分$/.test(current.text.trim())) {
                         if (next && (next.type === 'section_header' || next.type === 'body' || next.type === 'no_indent_body')) {
                             if (next.text.length < 50) {
@@ -282,14 +336,11 @@
                     
                     finalProcessed.push(current);
                     
-                    // 2. 空行规则：只在【大标题块】完全结束后，插入一个空行
-                    // 逻辑：如果当前是标题，且下一行 *不是* 标题，则插入空行
                     if (current.type === 'title') {
                         if (next && next.type !== 'title' && next.type !== 'empty_line') {
                             finalProcessed.push({ type: 'empty_line' });
                         }
                     }
-                    // 注意：这里删除了之前版本中自动给 SectionHeader 和 H1 前面加空行的逻辑
                 }
                 
                 if (finalProcessed.length > 0 && finalProcessed[0].type !== 'title') {
@@ -298,8 +349,7 @@
                 }
                 
                 if (detectedTitleParts.length > 0) {
-                    const fullTitle = detectedTitleParts.join("").replace(/[\\/:*?"<>|]/g, "").substring(0, 50);
-                    setDocName(fullTitle);
+                    setDocName(detectedTitleParts.join("").replace(/[\\/:*?"<>|]/g, "").substring(0, 50));
                 } else {
                     setDocName("公文文件");
                 }
@@ -355,8 +405,10 @@
                 if (!window.docx || content.length === 0) return;
                 const { Document, Packer, Paragraph, TextRun, AlignmentType, Footer, PageNumber, Table, TableRow, TableCell, WidthType, BorderStyle, VerticalAlign, TableLayoutType } = window.docx;
                 
+                const LINE_HEIGHT_BODY = SPECS.lineHeightBody;
+
                 const doc = new Document({
-                    styles: { paragraphStyles: [{ id: "Normal", name: "Normal", run: { font: "仿宋_GB2312", size: 32 }, paragraph: { spacing: { line: SPECS.lineHeightBody, lineRule: "exact" }, alignment: AlignmentType.JUSTIFIED } }] },
+                    styles: { paragraphStyles: [{ id: "Normal", name: "Normal", run: { font: "仿宋_GB2312", size: 32 }, paragraph: { spacing: { line: LINE_HEIGHT_BODY, lineRule: "exact" }, alignment: AlignmentType.JUSTIFIED } }] },
                     sections: [{
                         properties: { page: { margin: { top: "37mm", bottom: "35mm", left: "28mm", right: "26mm" } } },
                         footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [ new TextRun({ text: "— ", font: "宋体", size: 28 }), new TextRun({ children: [PageNumber.CURRENT], font: "宋体", size: 28 }), new TextRun({ text: " —", font: "宋体", size: 28 }) ] })] }) },
@@ -370,46 +422,91 @@
                             }
                             
                             if (block.type === 'empty_line') {
-                                return new Paragraph({ text: "", spacing: { line: SPECS.lineHeightBody, lineRule: "exact" } }); 
+                                return new Paragraph({ text: "", spacing: { line: LINE_HEIGHT_BODY, lineRule: "exact" } }); 
+                            }
+
+                            if (block.type === 'signature_group') {
+                                // 动态计算占位列宽度
+                                const rightPaddingDXA = Math.max(0, Math.floor(block.rightOffsetChars * 320));
+
+                                const sigRows = block.lines.map(line => 
+                                    new TableRow({
+                                        children: [
+                                            new TableCell({
+                                                children: [new Paragraph({ text: line, style: "Normal", alignment: AlignmentType.CENTER })],
+                                                // 明确指定无边框颜色为 auto 或 white 尝试规避视觉干扰
+                                                borders: { 
+                                                    top: { style: BorderStyle.NIL, size: 0, color: "auto" }, 
+                                                    bottom: { style: BorderStyle.NIL, size: 0, color: "auto" }, 
+                                                    left: { style: BorderStyle.NIL, size: 0, color: "auto" }, 
+                                                    right: { style: BorderStyle.NIL, size: 0, color: "auto" } 
+                                                }
+                                            }),
+                                            new TableCell({
+                                                children: [],
+                                                width: { size: rightPaddingDXA, type: WidthType.DXA },
+                                                borders: { 
+                                                    top: { style: BorderStyle.NIL, size: 0, color: "auto" }, 
+                                                    bottom: { style: BorderStyle.NIL, size: 0, color: "auto" }, 
+                                                    left: { style: BorderStyle.NIL, size: 0, color: "auto" }, 
+                                                    right: { style: BorderStyle.NIL, size: 0, color: "auto" } 
+                                                }
+                                            })
+                                        ]
+                                    })
+                                );
+
+                                return [
+                                    new Paragraph({ text: "", spacing: { line: LINE_HEIGHT_BODY, lineRule: "exact" } }),
+                                    new Paragraph({ text: "", spacing: { line: LINE_HEIGHT_BODY, lineRule: "exact" } }),
+                                    new Paragraph({ text: "", spacing: { line: LINE_HEIGHT_BODY, lineRule: "exact" } }),
+                                    new Table({
+                                        alignment: AlignmentType.RIGHT,
+                                        layout: TableLayoutType.AUTOFIT,
+                                        rows: sigRows,
+                                        borders: { 
+                                            top: { style: BorderStyle.NIL, size: 0, color: "auto" }, 
+                                            bottom: { style: BorderStyle.NIL, size: 0, color: "auto" }, 
+                                            left: { style: BorderStyle.NIL, size: 0, color: "auto" }, 
+                                            right: { style: BorderStyle.NIL, size: 0, color: "auto" } 
+                                        }
+                                    })
+                                ];
                             }
 
                             let runCfg = { text: block.text, size: 32, font: "仿宋_GB2312" };
-                            let paraCfg = { spacing: { line: SPECS.lineHeightBody, lineRule: "exact", before: 0, after: 0 }, indent: { firstLine: 640 }, alignment: AlignmentType.JUSTIFIED };
+                            let paraCfg = { spacing: { line: LINE_HEIGHT_BODY, lineRule: "exact", before: 0, after: 0 }, indent: { firstLine: 640 }, alignment: AlignmentType.JUSTIFIED };
                             
                             switch(block.type) {
                                 case 'title': 
                                     runCfg = { text: block.text, size: 44, font: "方正小标宋简体" }; 
                                     runCfg.bold = false; 
-                                    paraCfg = { alignment: AlignmentType.CENTER, spacing: { line: SPECS.lineHeightHeader, lineRule: "exact" }, indent: { firstLine: 0 } }; 
+                                    paraCfg = { alignment: AlignmentType.CENTER, spacing: { line: LINE_HEIGHT_BODY, lineRule: "exact" }, indent: { firstLine: 0 } }; 
                                     break;
                                 case 'section_header': 
                                     runCfg = { text: block.text, size: 32, font: "黑体" }; 
                                     runCfg.bold = false; 
-                                    paraCfg = { alignment: AlignmentType.CENTER, indent: { firstLine: 0 }, spacing: { line: SPECS.lineHeightHeader, lineRule: "exact" } }; 
+                                    paraCfg = { alignment: AlignmentType.CENTER, indent: { firstLine: 0 }, spacing: { line: LINE_HEIGHT_BODY, lineRule: "exact" } }; 
                                     break;
                                 case 'h1': 
                                     runCfg.font = "黑体"; 
                                     runCfg.bold = false; 
-                                    paraCfg.spacing = { line: SPECS.lineHeightHeader, lineRule: "exact" }; 
+                                    paraCfg.spacing = { line: LINE_HEIGHT_BODY, lineRule: "exact" }; 
                                     break;
                                 case 'h2': 
                                     runCfg.font = "楷体_GB2312"; 
                                     runCfg.bold = false; 
-                                    paraCfg.spacing = { line: SPECS.lineHeightHeader, lineRule: "exact" };
                                     break;
                                 case 'h3': 
                                     runCfg.font = "仿宋_GB2312"; 
                                     runCfg.bold = false; 
                                     break; 
-                                case 'signature_date': 
-                                    paraCfg = { alignment: AlignmentType.RIGHT, indent: { right: 800 }, spacing: { line: SPECS.lineHeightBody, lineRule: "exact" } }; 
-                                    break;
                                 case 'no_indent_body': 
-                                    paraCfg = { alignment: AlignmentType.LEFT, indent: { firstLine: 0 }, spacing: { line: SPECS.lineHeightBody, lineRule: "exact" } }; 
+                                    paraCfg = { alignment: AlignmentType.LEFT, indent: { firstLine: 0 }, spacing: { line: LINE_HEIGHT_BODY, lineRule: "exact" } }; 
                                     break;
                             }
                             return new Paragraph({ children: [new TextRun(runCfg)], ...paraCfg });
-                        })
+                        }).flat()
                     }]
                 });
                 Packer.toBlob(doc).then(blob => {
@@ -427,7 +524,7 @@
                             <div className="bg-red-600 text-white p-2 rounded"><Icon path={paths.file} /></div>
                             <div>
                                 <h1 className="text-xl font-bold text-gray-900">KIWI智能排版系统 Pro</h1>
-                                <p className="text-xs text-gray-500">严控空行 · 智能合并 · 1:1还原</p>
+                                <p className="text-xs text-gray-500">统一28磅行距 · 落款智能居中 · 标准公文格式</p>
                             </div>
                         </div>
                         <div className="flex gap-2">
@@ -435,6 +532,13 @@
                              {content.length > 0 && <button onClick={generateDocx} className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm rounded shadow flex items-center gap-1"><Icon path={paths.download} /> 下载 Word</button>}
                         </div>
                     </header>
+                    {/* 提示栏 */}
+                    {content.some(b => b.type === 'signature_group') && (
+                        <div className="bg-yellow-50 px-6 py-2 border-b border-yellow-100 flex items-center gap-2 text-xs text-yellow-700 print-hidden">
+                            <Icon path={paths.info} />
+                            <span>提示：导出 Word 后，若在落款处看到虚线框，为 Word 辅助查看的“网格线”，打印时不会显示。可在 Word 中点击“布局”->取消勾选“查看网格线”隐藏。</span>
+                        </div>
+                    )}
 
                     <main className="flex-1 w-full max-w-[1600px] mx-auto p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-2 gap-6 overflow-hidden">
                         <div className="flex flex-col gap-4 print-hidden h-full min-h-0">
@@ -445,7 +549,7 @@
                             <div className="flex-1 bg-white rounded-xl border shadow-sm overflow-hidden flex flex-col min-h-0">
                                 {activeTab === 'text' ? (
                                     <div className="flex-1 flex flex-col p-4 h-full min-h-0">
-                                        <textarea className="flex-1 w-full p-3 resize-none outline-none text-sm border rounded focus:border-blue-300 focus:bg-blue-50/20 custom-scroll" placeholder="请在此粘贴... &#10;系统会自动识别文字，并对包含数据的区域生成表格。" value={inputText} onChange={e => setInputText(e.target.value)} />
+                                        <textarea className="flex-1 w-full p-3 resize-none outline-none text-sm border rounded focus:border-blue-300 focus:bg-blue-50/20 custom-scroll" placeholder="请在此粘贴... &#10;系统会自动识别文末的落款和日期，并按公文标准进行排版（正文下空三行，落款整体居中，日期右侧缩进4字）。" value={inputText} onChange={e => setInputText(e.target.value)} />
                                         <div className="mt-4 flex justify-end shrink-0"><button onClick={handleProcess} disabled={!inputText.trim() || isProcessing} className="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded shadow flex items-center gap-2 transition">{isProcessing ? '处理中...' : '一键智能排版'}</button></div>
                                     </div>
                                 ) : (
@@ -481,25 +585,47 @@
                                                     </div>
                                                 );
                                             }
-                                            // 预览空行
+                                            
                                             if (block.type === 'empty_line') {
-                                                return <div key={i} style={{ height: '28pt' }}></div>;
+                                                return <div key={i} style={{ height: SPECS.cssLineHeightBody }}></div>;
+                                            }
+
+                                            if (block.type === 'signature_group') {
+                                                return (
+                                                    <div key={i} style={{ 
+                                                        marginTop: `calc(${SPECS.cssLineHeightBody} * 3)`,
+                                                        display: 'flex',
+                                                        justifyContent: 'flex-end',
+                                                        paddingRight: `${block.rightOffsetChars}em`, // 动态计算的Padding
+                                                        fontFamily: SPECS.fonts.body,
+                                                        fontSize: SPECS.sizes.body,
+                                                        lineHeight: SPECS.cssLineHeightBody
+                                                    }}>
+                                                        <div style={{
+                                                            display: 'flex',
+                                                            flexDirection: 'column',
+                                                            alignItems: 'center',
+                                                            textAlign: 'center'
+                                                        }}>
+                                                            {block.lines.map((line, idx) => (
+                                                                <div key={idx}>{line}</div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                );
                                             }
 
                                             const styles = {
-                                                title: { fontFamily: SPECS.fonts.title, fontSize: SPECS.sizes.title, textAlign: 'center', lineHeight: '1.5', marginBottom: '0' },
-                                                section_header: { fontFamily: SPECS.fonts.h1, fontSize: SPECS.sizes.header, textAlign: 'center', lineHeight: SPECS.lineHeightHeader + 'twips', marginTop: '0', marginBottom: '0', fontWeight: 'bold' },
-                                                h1: { fontFamily: SPECS.fonts.h1, fontSize: SPECS.sizes.header, lineHeight: SPECS.lineHeightHeader + 'twips', textIndent: '2em', marginTop: '0', marginBottom: '0' },
-                                                h2: { fontFamily: SPECS.fonts.h2, fontSize: SPECS.sizes.header, lineHeight: SPECS.lineHeightHeader + 'twips', textIndent: '2em', marginTop: '0', marginBottom: '0' },
-                                                h3: { fontFamily: SPECS.fonts.h3, fontSize: SPECS.sizes.header, lineHeight: SPECS.lineHeightBody + 'twips', textIndent: '2em', marginTop: '0', marginBottom: '0' }, 
-                                                body: { fontFamily: SPECS.fonts.body, fontSize: SPECS.sizes.body, lineHeight: SPECS.lineHeightBody + 'twips', textIndent: '2em', textAlign: 'justify', wordBreak: 'break-all' },
-                                                no_indent_body: { fontFamily: SPECS.fonts.body, fontSize: SPECS.sizes.body, lineHeight: SPECS.lineHeightBody + 'twips', textIndent: '0', textAlign: 'left', wordBreak: 'break-all', marginBottom: '0.5em' },
-                                                signature_date: { fontFamily: SPECS.fonts.body, fontSize: SPECS.sizes.body, lineHeight: SPECS.lineHeightBody + 'twips', textAlign: 'right', marginTop: '1em', marginRight: '4em' }
+                                                title: { fontFamily: SPECS.fonts.title, fontSize: SPECS.sizes.title, textAlign: 'center', lineHeight: SPECS.cssLineHeightBody, marginBottom: '0' },
+                                                section_header: { fontFamily: SPECS.fonts.h1, fontSize: SPECS.sizes.header, textAlign: 'center', lineHeight: SPECS.cssLineHeightBody, marginTop: '0', marginBottom: '0', fontWeight: 'bold' },
+                                                h1: { fontFamily: SPECS.fonts.h1, fontSize: SPECS.sizes.header, lineHeight: SPECS.cssLineHeightBody, textIndent: '2em', marginTop: '0', marginBottom: '0' },
+                                                h2: { fontFamily: SPECS.fonts.h2, fontSize: SPECS.sizes.header, lineHeight: SPECS.cssLineHeightBody, textIndent: '2em', marginTop: '0', marginBottom: '0' },
+                                                h3: { fontFamily: SPECS.fonts.h3, fontSize: SPECS.sizes.header, lineHeight: SPECS.cssLineHeightBody, textIndent: '2em', marginTop: '0', marginBottom: '0' }, 
+                                                body: { fontFamily: SPECS.fonts.body, fontSize: SPECS.sizes.body, lineHeight: SPECS.cssLineHeightBody, textIndent: '2em', textAlign: 'justify', wordBreak: 'break-all' },
+                                                no_indent_body: { fontFamily: SPECS.fonts.body, fontSize: SPECS.sizes.body, lineHeight: SPECS.cssLineHeightBody, textIndent: '0', textAlign: 'left', wordBreak: 'break-all', marginBottom: '0.5em' }
                                             };
                                             
-                                            // 预览时的行高模拟
-                                            const lineHeightPx = (block.type === 'h1' || block.type === 'h2' || block.type === 'section_header' || block.type === 'title') ? '42px' : '37px';
-                                            const finalStyle = { ...styles[block.type] || styles.body, lineHeight: lineHeightPx };
+                                            const finalStyle = { ...styles[block.type] || styles.body };
 
                                             return <div key={i} style={finalStyle}>{block.text}</div>;
                                         })}
